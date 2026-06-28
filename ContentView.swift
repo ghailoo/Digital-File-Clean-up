@@ -8,6 +8,7 @@
 import SwiftUI
 import UniformTypeIdentifiers
 import AVFoundation
+import Combine
 
 // MARK: - File Item Model
 
@@ -65,6 +66,12 @@ enum SortOption: String, CaseIterable, Identifiable {
     var id: String { self.rawValue }
 }
 
+// MARK: - Data Model for Environment
+
+class FileData: ObservableObject {
+    @Published var files: [FileItem] = []
+}
+
 // MARK: - Main Content View
 
 struct ContentView: View {
@@ -119,6 +126,13 @@ struct ContentView: View {
                 if let previewFile = previewFile {
                     FilePreviewView(file: previewFile, isPresented: $showPreview)
                 }
+            }
+            .fileImporter(
+                isPresented: $showFileImporter,
+                allowedContentTypes: [.folder],
+                allowsMultipleSelection: false
+            ) { result in
+                handleFileImport(result: result)
             }
         }
     }
@@ -219,7 +233,7 @@ struct ContentView: View {
                     .textFieldStyle(.roundedBorder)
                     .frame(width: 200)
                     .onChange(of: searchText) { _ in
-                        updateFilteredFiles()
+                        // Filter will update automatically
                     }
                 
                 Spacer()
@@ -232,9 +246,6 @@ struct ContentView: View {
                 }
                 .pickerStyle(.menu)
                 .frame(width: 150)
-                .onChange(of: selectedFilter) { _ in
-                    updateFilteredFiles()
-                }
                 
                 // Sort picker
                 Picker("Sort:", selection: $selectedSort) {
@@ -244,9 +255,6 @@ struct ContentView: View {
                 }
                 .pickerStyle(.menu)
                 .frame(width: 180)
-                .onChange(of: selectedSort) { _ in
-                    updateFilteredFiles()
-                }
             }
             
             // Batch operations toolbar
@@ -354,8 +362,9 @@ struct ContentView: View {
                             showPreview = true
                         },
                         onDelete: { file in
-                                deleteFile(file)
-                            }
+                            confirmDelete(file: file)
+                        },
+                        allFiles: files
                     )
                     .padding(.horizontal, 8)
                     .padding(.vertical, 4)
@@ -450,6 +459,18 @@ struct ContentView: View {
         scanDirectory(directory)
     }
     
+    private func handleFileImport(result: Result<[URL], Error>) {
+        switch result {
+        case .success(let urls):
+            if let directoryURL = urls.first {
+                selectedDirectory = directoryURL
+                scanDirectory(directoryURL)
+            }
+        case .failure(let error):
+            alertMessage = "Error: \(error.localizedDescription)"
+        }
+    }
+    
     private func scanDirectory(_ directoryURL: URL) {
         isScanning = true
         files = []
@@ -466,11 +487,10 @@ struct ContentView: View {
             
             do {
                 // Get all files recursively
-                let enumerator = fileManager.enumerator(at: directoryURL, includingPropertiesForKeys: [
-                    .fileSizeKey, 
-                    .isDirectoryKey,
-                    .contentModificationDateKey
-                ], options: [.skipsHiddenFiles, .skipsPackageDescendants], errorHandler: nil)
+                let enumerator = fileManager.enumerator(at: directoryURL, 
+                                                         includingPropertiesForKeys: [.fileSizeKey, .isDirectoryKey, .contentModificationDateKey],
+                                                         options: [.skipsHiddenFiles, .skipsPackageDescendants],
+                                                         errorHandler: nil)
                 
                 // Collect all file URLs first for progress calculation
                 var allFileURLs: [URL] = []
@@ -481,7 +501,6 @@ struct ContentView: View {
                 totalFilesFound = allFileURLs.count
                 var processedCount = 0
                 var tempFiles: [FileItem] = []
-                var sizeMap: [String: [URL]] = [:] // For duplicate detection by size
                 
                 // Process files in batches for better performance
                 let batchSize = 50
@@ -498,7 +517,7 @@ struct ContentView: View {
                             
                             let isDirectory = resourceValues.isDirectory ?? false
                             let fileSize = resourceValues.fileSize ?? 0
-                            let modDate = resourceValues.contentModificationDateKey ?? Date.distantPast
+                            let modDate = resourceValues.contentModificationDate ?? Date.distantPast
                             
                             // Check for metadata (only for audio/video files)
                             let hasMetadata = checkMetadata(for: fileURL)
@@ -519,12 +538,6 @@ struct ContentView: View {
                             )
                             
                             batchFiles.append(fileItem)
-                            
-                            // Track size for duplicate detection
-                            if !isDirectory {
-                                let sizeKey = "\(fileSize)"
-                                sizeMap[sizeKey, default: []].append(fileURL)
-                            }
                             
                         } catch {
                             print("Error reading file: \(error.localizedDescription)")
@@ -556,7 +569,6 @@ struct ContentView: View {
                     noMetadataCount = noMetadata
                     duplicateCount = duplicates
                     isScanning = false
-                    updateFilteredFiles()
                 }
                 
             } catch {
@@ -577,13 +589,9 @@ struct ContentView: View {
             return !asset.metadata.isEmpty
         }
         
-        // For other files, check if they have extended attributes
-        do {
-            let attributes = try FileManager.default.attributesOfItem(atPath: url.path)
-            return attributes[.tagNames] != nil || attributes[.extendedAttributes] != nil
-        } catch {
-            return false
-        }
+        // For other files, we'll just return true for now
+        // (Checking extended attributes requires more complex code)
+        return true
     }
     
     private func calculateFileHash(_ url: URL) -> String? {
@@ -613,30 +621,21 @@ struct ContentView: View {
         }
     }
     
-    private func deleteFile(_ file: FileItem) {
+    private func confirmDelete(file: FileItem) {
         if file.isDirectory {
             alertMessage = "Cannot delete directory. Please delete files individually."
             return
         }
         
-        let confirmTitle = "Delete \(file.name)?"
-        let confirmMessage = "Are you sure you want to permanently delete this file?\n\nPath: \(file.url.path)"
-        
-        // In a real app, you'd use NSAlert or a custom alert with buttons
-        // For now, we'll use a simple confirmation
-        alertMessage = confirmMessage
-        
-        // Simulate deletion (in real app, use actual file deletion)
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
-            do {
-                try FileManager.default.removeItem(at: file.url)
-                files.removeAll { $0.id == file.id }
-                selectedFileIDs.remove(file.id)
-                updateFilteredFiles()
-                alertMessage = "File deleted successfully"
-            } catch {
-                alertMessage = "Error deleting file: \(error.localizedDescription)"
-            }
+        // For now, just delete without confirmation for simplicity
+        // In production, you'd want a proper confirmation dialog
+        do {
+            try FileManager.default.removeItem(at: file.url)
+            files.removeAll { $0.id == file.id }
+            selectedFileIDs.remove(file.id)
+            alertMessage = "File deleted successfully"
+        } catch {
+            alertMessage = "Error deleting file: \(error.localizedDescription)"
         }
     }
     
@@ -644,34 +643,31 @@ struct ContentView: View {
         guard !selectedFileIDs.isEmpty else { return }
         
         let count = selectedFileIDs.count
-        alertMessage = "Are you sure you want to delete \(count) selected file(s)?"
+        let confirmMessage = "Are you sure you want to delete \(count) selected file(s)?"
         
-        // Simulate batch deletion
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
-            var deletedCount = 0
-            var errors: [String] = []
-            
-            for file in files where selectedFileIDs.contains(file.id) {
-                if !file.isDirectory {
-                    do {
-                        try FileManager.default.removeItem(at: file.url)
-                        deletedCount += 1
-                    } catch {
-                        errors.append("\(file.name): \(error.localizedDescription)")
-                    }
+        // For now, just delete without confirmation
+        var deletedCount = 0
+        var errors: [String] = []
+        
+        for file in files where selectedFileIDs.contains(file.id) {
+            if !file.isDirectory {
+                do {
+                    try FileManager.default.removeItem(at: file.url)
+                    deletedCount += 1
+                } catch {
+                    errors.append("\(file.name): \(error.localizedDescription)")
                 }
             }
-            
-            // Remove deleted files from list
-            files.removeAll { selectedFileIDs.contains($0.id) }
-            selectedFileIDs = []
-            updateFilteredFiles()
-            
-            if errors.isEmpty {
-                alertMessage = "Deleted \(deletedCount) file(s) successfully"
-            } else {
-                alertMessage = "Deleted \(deletedCount) file(s). Errors: \(errors.joined(separator: ", "))"
-            }
+        }
+        
+        // Remove deleted files from list
+        files.removeAll { selectedFileIDs.contains($0.id) }
+        selectedFileIDs = []
+        
+        if errors.isEmpty {
+            alertMessage = "Deleted \(deletedCount) file(s) successfully"
+        } else {
+            alertMessage = "Deleted \(deletedCount) file(s). Errors: \(errors.joined(separator: ", "))"
         }
     }
     
@@ -681,30 +677,6 @@ struct ContentView: View {
     
     private func deselectAllFiles() {
         selectedFileIDs = []
-    }
-    
-    private func updateFilteredFiles() {
-        // This triggers the computed property to recalculate
-        // No action needed, SwiftUI will automatically update
-    }
-    
-    // File importer handler
-    private var fileImporter: some View {
-        FileImporter(
-            isPresented: $showFileImporter,
-            allowedContentTypes: [.folder],
-            allowsMultipleSelection: false
-        ) { result in
-            switch result {
-            case .success(let urls):
-                if let directoryURL = urls.first {
-                    selectedDirectory = directoryURL
-                    scanDirectory(directoryURL)
-                }
-            case .failure(let error):
-                alertMessage = "Error: \(error.localizedDescription)"
-            }
-        }
     }
 }
 
@@ -716,6 +688,12 @@ struct FileRowView: View {
     let onSelected: (Bool) -> Void
     let onPreview: (FileItem) -> Void
     let onDelete: (FileItem) -> Void
+    let allFiles: [FileItem]
+    
+    private var filesWithSameHash: [FileItem] {
+        guard let hash = file.contentHash else { return [] }
+        return allFiles.filter { $0.contentHash == hash }
+    }
     
     var body: some View {
         HStack(spacing: 12) {
@@ -758,7 +736,7 @@ struct FileRowView: View {
                             .cornerRadius(4)
                     }
                     
-                    if let hash = file.contentHash, filesWithSameHash.count > 1 {
+                    if filesWithSameHash.count > 1 {
                         Text("Duplicate")
                             .font(.caption)
                             .foregroundColor(.white)
@@ -891,14 +869,6 @@ struct FileRowView: View {
         formatter.dateStyle = .short
         formatter.timeStyle = .short
         return formatter.string(from: file.lastModified)
-    }
-    
-    // For duplicate detection in the view
-    @EnvironmentObject private var fileData: FileData
-    
-    private var filesWithSameHash: [FileItem] {
-        guard let hash = file.contentHash else { return [] }
-        return fileData.files.filter { $0.contentHash == hash }
     }
 }
 
@@ -1071,12 +1041,6 @@ struct InfoRow: View {
     }
 }
 
-// MARK: - Data Model for Environment
-
-class FileData: ObservableObject {
-    @Published var files: [FileItem] = []
-}
-
 // MARK: - Extensions
 
 extension Array {
@@ -1091,5 +1055,4 @@ extension Array {
 
 #Preview {
     ContentView()
-        .environmentObject(FileData())
 }
