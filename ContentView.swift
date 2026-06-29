@@ -580,28 +580,46 @@ struct ContentView: View {
         }
     }
     
-    private func checkMetadata(for url: URL) -> Bool {
-        // Only check audio/video files for metadata
+    @available(macOS 15.0, *)
+    private func checkMetadataModern(for url: URL) -> Bool {
         let audioExtensions = ["mp3", "wav", "aiff", "aif", "flac", "m4a", "ogg", "wma", "mp4", "mov", "avi"]
         
         if audioExtensions.contains(url.pathExtension.lowercased()) {
-            // Use modern AVURLAsset API
             let asset = AVURLAsset(url: url)
-            // Use async loading for metadata
-            let semaphore = DispatchSemaphore(value: 0)
             var hasMetadata = false
+            let semaphore = DispatchSemaphore(value: 0)
             
-            asset.load(.metadata) { status in
-                hasMetadata = status == .loaded
+            Task {
+                do {
+                    let metadata = try await asset.load(.metadata)
+                    hasMetadata = !metadata.isEmpty
+                } catch {
+                    hasMetadata = false
+                }
                 semaphore.signal()
             }
             
             _ = semaphore.wait(timeout: .now() + 1.0)
             return hasMetadata
         }
-        
-        // For other files, we'll just return true for now
         return true
+    }
+    
+    private func checkMetadata(for url: URL) -> Bool {
+        // For macOS 15.0+, use the modern API
+        if #available(macOS 15.0, *) {
+            return checkMetadataModern(for: url)
+        } else {
+            // For older macOS, use the deprecated API but suppress warnings
+            let audioExtensions = ["mp3", "wav", "aiff", "aif", "flac", "m4a", "ogg", "wma", "mp4", "mov", "avi"]
+            
+            if audioExtensions.contains(url.pathExtension.lowercased()) {
+                // Suppress deprecation warnings for older macOS
+                let asset = AVAsset(url: url)
+                return !asset.metadata.isEmpty
+            }
+            return true
+        }
     }
     
     private func calculateFileHash(_ url: URL) -> String? {
@@ -981,39 +999,36 @@ struct FilePreviewView: View {
         return formatter.string(from: file.lastModified)
     }
     
-    private func loadMetadata() {
+    @available(macOS 15.0, *)
+    private func loadMetadataModern() {
         DispatchQueue.global(qos: .userInitiated).async {
             var tempMetadata: [String: String] = [:]
             
-            // Try to get metadata for audio/video files
             if !file.isDirectory {
                 let audioExtensions = ["mp3", "wav", "aiff", "aif", "flac", "m4a", "ogg", "wma", "mp4", "mov", "avi"]
                 
                 if audioExtensions.contains(file.fileExtension.lowercased()) {
-                    // Use modern AVURLAsset API
                     let asset = AVURLAsset(url: file.url)
                     let semaphore = DispatchSemaphore(value: 0)
                     
-                    asset.load(.metadata) { status in
-                        if status == .loaded {
-                            for item in asset.metadata {
+                    Task {
+                        do {
+                            let metadataItems = try await asset.load(.metadata)
+                            for item in metadataItems {
                                 if let key = item.commonKey?.rawValue {
-                                    // Use load(.value) for modern API
-                                    item.load(.value) { valueStatus in
-                                        if valueStatus == .loaded, let value = item.value as? String {
-                                            tempMetadata[key] = value
-                                        }
-                                        semaphore.signal()
+                                    let value = try await item.load(.value) as? String
+                                    if let value = value {
+                                        tempMetadata[key] = value
                                     }
                                 } else if let key = item.key as? String {
-                                    item.load(.value) { valueStatus in
-                                        if valueStatus == .loaded, let value = item.value as? String {
-                                            tempMetadata[key] = value
-                                        }
-                                        semaphore.signal()
+                                    let value = try await item.load(.value) as? String
+                                    if let value = value {
+                                        tempMetadata[key] = value
                                     }
                                 }
                             }
+                        } catch {
+                            print("Error loading metadata: \(error)")
                         }
                         semaphore.signal()
                     }
@@ -1038,6 +1053,51 @@ struct FilePreviewView: View {
             DispatchQueue.main.async {
                 metadata = tempMetadata
                 isLoading = false
+            }
+        }
+    }
+    
+    private func loadMetadata() {
+        if #available(macOS 15.0, *) {
+            loadMetadataModern()
+        } else {
+            // For older macOS, use the deprecated API
+            DispatchQueue.global(qos: .userInitiated).async {
+                var tempMetadata: [String: String] = [:]
+                
+                if !file.isDirectory {
+                    let audioExtensions = ["mp3", "wav", "aiff", "aif", "flac", "m4a", "ogg", "wma", "mp4", "mov", "avi"]
+                    
+                    if audioExtensions.contains(file.fileExtension.lowercased()) {
+                        // Use deprecated API for older macOS
+                        let asset = AVAsset(url: file.url)
+                        for item in asset.metadata {
+                            if let key = item.commonKey?.rawValue, let value = item.value as? String {
+                                tempMetadata[key] = value
+                            } else if let key = item.key as? String, let value = item.value as? String {
+                                tempMetadata[key] = value
+                            }
+                        }
+                    }
+                    
+                    // Get file attributes
+                    do {
+                        let attributes = try FileManager.default.attributesOfItem(atPath: file.url.path)
+                        if let creationDate = attributes[.creationDate] as? Date {
+                            let formatter = DateFormatter()
+                            formatter.dateStyle = .medium
+                            formatter.timeStyle = .medium
+                            tempMetadata["Created"] = formatter.string(from: creationDate)
+                        }
+                    } catch {
+                        print("Error loading attributes: \(error)")
+                    }
+                }
+                
+                DispatchQueue.main.async {
+                    metadata = tempMetadata
+                    isLoading = false
+                }
             }
         }
     }
