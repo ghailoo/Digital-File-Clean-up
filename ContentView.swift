@@ -485,7 +485,6 @@ struct ContentView: View {
         DispatchQueue.global(qos: .userInitiated).async {
             let fileManager = FileManager.default
             
-            do {
                 // Get all files recursively
                 let enumerator = fileManager.enumerator(at: directoryURL, 
                                                          includingPropertiesForKeys: [.fileSizeKey, .isDirectoryKey, .contentModificationDateKey],
@@ -571,12 +570,6 @@ struct ContentView: View {
                     isScanning = false
                 }
                 
-            } catch {
-                DispatchQueue.main.async {
-                    alertMessage = "Error scanning directory: \(error.localizedDescription)"
-                    isScanning = false
-                }
-            }
         }
     }
     
