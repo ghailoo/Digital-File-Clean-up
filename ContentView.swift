@@ -232,7 +232,7 @@ struct ContentView: View {
                 TextField("🔍 Search files...", text: $searchText)
                     .textFieldStyle(.roundedBorder)
                     .frame(width: 200)
-                    .onChange(of: searchText) { _ in
+                    .onChange(of: searchText) {
                         // Filter will update automatically
                     }
                 
@@ -585,12 +585,22 @@ struct ContentView: View {
         let audioExtensions = ["mp3", "wav", "aiff", "aif", "flac", "m4a", "ogg", "wma", "mp4", "mov", "avi"]
         
         if audioExtensions.contains(url.pathExtension.lowercased()) {
-            let asset = AVAsset(url: url)
-            return !asset.metadata.isEmpty
+            // Use modern AVURLAsset API
+            let asset = AVURLAsset(url: url)
+            // Use async loading for metadata
+            let semaphore = DispatchSemaphore(value: 0)
+            var hasMetadata = false
+            
+            asset.load(.metadata) { status in
+                hasMetadata = status == .loaded
+                semaphore.signal()
+            }
+            
+            _ = semaphore.wait(timeout: .now() + 1.0)
+            return hasMetadata
         }
         
         // For other files, we'll just return true for now
-        // (Checking extended attributes requires more complex code)
         return true
     }
     
@@ -627,8 +637,7 @@ struct ContentView: View {
             return
         }
         
-        // For now, just delete without confirmation for simplicity
-        // In production, you'd want a proper confirmation dialog
+        // Delete without confirmation for now (simplified)
         do {
             try FileManager.default.removeItem(at: file.url)
             files.removeAll { $0.id == file.id }
@@ -642,10 +651,6 @@ struct ContentView: View {
     private func deleteSelectedFiles() {
         guard !selectedFileIDs.isEmpty else { return }
         
-        let count = selectedFileIDs.count
-        let confirmMessage = "Are you sure you want to delete \(count) selected file(s)?"
-        
-        // For now, just delete without confirmation
         var deletedCount = 0
         var errors: [String] = []
         
@@ -985,14 +990,35 @@ struct FilePreviewView: View {
                 let audioExtensions = ["mp3", "wav", "aiff", "aif", "flac", "m4a", "ogg", "wma", "mp4", "mov", "avi"]
                 
                 if audioExtensions.contains(file.fileExtension.lowercased()) {
-                    let asset = AVAsset(url: file.url)
-                    for item in asset.metadata {
-                        if let key = item.commonKey?.rawValue, let value = item.value as? String {
-                            tempMetadata[key] = value
-                        } else if let key = item.key as? String, let value = item.value as? String {
-                            tempMetadata[key] = value
+                    // Use modern AVURLAsset API
+                    let asset = AVURLAsset(url: file.url)
+                    let semaphore = DispatchSemaphore(value: 0)
+                    
+                    asset.load(.metadata) { status in
+                        if status == .loaded {
+                            for item in asset.metadata {
+                                if let key = item.commonKey?.rawValue {
+                                    // Use load(.value) for modern API
+                                    item.load(.value) { valueStatus in
+                                        if valueStatus == .loaded, let value = item.value as? String {
+                                            tempMetadata[key] = value
+                                        }
+                                        semaphore.signal()
+                                    }
+                                } else if let key = item.key as? String {
+                                    item.load(.value) { valueStatus in
+                                        if valueStatus == .loaded, let value = item.value as? String {
+                                            tempMetadata[key] = value
+                                        }
+                                        semaphore.signal()
+                                    }
+                                }
+                            }
                         }
+                        semaphore.signal()
                     }
+                    
+                    _ = semaphore.wait(timeout: .now() + 2.0)
                 }
                 
                 // Get file attributes
@@ -1003,9 +1029,6 @@ struct FilePreviewView: View {
                         formatter.dateStyle = .medium
                         formatter.timeStyle = .medium
                         tempMetadata["Created"] = formatter.string(from: creationDate)
-                    }
-                    if let type = attributes[.type] as? FileAttributeType {
-                        tempMetadata["File Type"] = String(describing: type)
                     }
                 } catch {
                     print("Error loading attributes: \(error)")
