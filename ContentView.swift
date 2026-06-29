@@ -516,7 +516,7 @@ struct ContentView: View {
                             ])
                             
                             let isDirectory = resourceValues.isDirectory ?? false
-                            let fileSize = resourceValues.fileSize ?? 0
+                            let fileSize = Int64(resourceValues.fileSize ?? 0)
                             let modDate = resourceValues.contentModificationDate ?? Date.distantPast
                             
                             // Check for metadata (only for audio/video files)
